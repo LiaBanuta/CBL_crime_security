@@ -2,8 +2,12 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 import os
+import folium
+from folium.plugins import HeatMap
 import plotly.graph_objects as go
 from sklearn.preprocessing import LabelEncoder
+from streamlit_folium import folium_static
+import datetime
 
 # ---- Title ----
 st.title("Burglary Forecast Dashboard")
@@ -25,9 +29,14 @@ try:
         # Filter for Burglary crimes only
         df_loaded = df_loaded[df_loaded["Crime type"] == "Burglary"].copy() # .copy() to avoid SettingWithCopyWarning
 
-        # Convert 'Month' to numerical (e.g., total months since a baseline)
+        # Convert 'Month' to datetime format
         df_loaded['Month_datetime'] = pd.to_datetime(df_loaded['Month'], format='%Y-%m')
-        df_loaded['Month_numeric'] = (df_loaded['Month_datetime'].dt.year - 2011) * 12 + df_loaded['Month_datetime'].dt.month
+
+        # Create a string column for year-month (e.g., "2013-01")
+        df_loaded['Year_Month'] = df_loaded['Month_datetime'].dt.to_period('M').astype(str)
+
+        # Create a numeric column for month
+        df_loaded['Month_numeric'] = df_loaded['Month_datetime'].dt.month
 
         # Label encode necessary columns for Parcoords
         le_lsoa = LabelEncoder()
@@ -59,19 +68,32 @@ except Exception as e:
 
 
 # ---- Sidebar filter ----
-# Use the original 'WD24NM' column directly here since we haven't renamed it yet for the filter selection
 borough_options = ["All"] + list(df["WD24NM"].dropna().unique())
 borough = st.sidebar.selectbox(
     "Select Borough (WD24NM column)",
     borough_options
 )
 
+# Filter for time interval using the slider
+min_date = df['Month_datetime'].min().date()  # Convert to datetime.date
+max_date = df['Month_datetime'].max().date()  # Convert to datetime.date
+
+date_range = st.sidebar.slider(
+    "Select Date Range",
+    min_value=min_date,
+    max_value=max_date,
+    value=(min_date, max_date),
+    format="YYYY-MM"
+)
+
 # Apply the borough filter here once globally
 if borough != "All":
     df_filtered = df[df["WD24NM"] == borough].copy()
 else:
-    df_filtered = df.copy() # Work with a copy to avoid modifying the original cached df
+    df_filtered = df.copy()  # Work with a copy to avoid modifying the original cached df
 
+# Apply the date filter here
+df_filtered = df_filtered[(df_filtered['Month_datetime'].dt.date >= date_range[0]) & (df_filtered['Month_datetime'].dt.date <= date_range[1])]
 
 # ---- Tabs ----
 tab1, tab2, tab3 = st.tabs(["Historical Data", "Model Predictions", "Cross-Analysis Results"])
@@ -79,25 +101,37 @@ tab1, tab2, tab3 = st.tabs(["Historical Data", "Model Predictions", "Cross-Analy
 with tab1:
     st.subheader(f"Data for {borough}" if borough != "All" else "All London Boroughs")
     
-    # Aggregate burglaries per year (using the filtered df)
-    summary = df_filtered.groupby("Year").size().reset_index(name="Burglaries")
+    # Aggregate burglaries per year and month (using the filtered df)
+    summary = df_filtered.groupby("Year_Month").size().reset_index(name="Burglaries")
 
     # ---- Plot ----
     chart = alt.Chart(summary).mark_line().encode(
-        x="Year:O",
+        x=alt.X('Year_Month:O', title="Year-Month"),  # Display Year-Month combination
         y="Burglaries:Q",
-        color=alt.value("blue")
-    ).properties(title="Historical Burglaries")
-
+        color=alt.value("blue"),
+        tooltip=['Year_Month:O', 'Burglaries:Q']  # Adding tooltip for better interaction
+    ).properties(
+        title="Monthly Burglaries with Seasonal Patterns"
+    )
+    
     st.altair_chart(chart, use_container_width=True)
 
-    # ---- Map placeholder ----
-    st.markdown("### Interactive Map (coming soon)")
-    st.map(pd.DataFrame({'lat': [51.5074], 'lon': [-0.1278]}))
+    # ---- Interactive Map ----
+    st.markdown("### Interactive Map of Crime Hotspots")
+
+    # Create a folium map centered around London
+    m = folium.Map(location=[51.5074, -0.1278], zoom_start=10)  # Center map on London
+
+    # Add HeatMap layer for burglary incidents
+    heat_data = [[row['Latitude'], row['Longitude']] for index, row in df_filtered.iterrows() if pd.notnull(row['Latitude']) and pd.notnull(row['Longitude'])]
+    HeatMap(heat_data).add_to(m)
+
+    # Add the map to Streamlit
+    folium_static(m)
 
     # ---- Notes ----
     st.markdown("""
-    *Note: This dashboard is based on raw crime records. Final version will include model results from our FNN and predictions.*
+    *Note: This map visualizes real crime data. Final version will include model results and predicted crime hotspots.*
     """)
     
 with tab2:
@@ -107,17 +141,16 @@ with tab3:
     st.subheader("Cross-Analysis Results")
     
     # --- Create the Plotly Figure (using the filtered df) ---
-
     fig = go.Figure(data=
         go.Parcoords(
             line=dict(color='blue', showscale=False), 
-            dimensions= list([
+            dimensions= list([  
                 dict(
                     range=[df_filtered['LSOA_name_encoded'].min(), df_filtered['LSOA_name_encoded'].max()],
                     constraintrange=[df_filtered['LSOA_name_encoded'].min(), df_filtered['LSOA_name_encoded'].max()], 
                     label='Borough',
                     values=df_filtered['LSOA_name_encoded'].tolist(),
-                    tickvals=lsoa_tickvals, # Use global tickvals/text
+                    tickvals=lsoa_tickvals, 
                     ticktext=lsoa_ticktext
                 ),
                 dict(
@@ -131,7 +164,7 @@ with tab3:
                     constraintrange=[df_filtered['WD24NM_encoded'].min(), df_filtered['WD24NM_encoded'].max()], 
                     label='Ward Name', 
                     values=df_filtered['WD24NM_encoded'].tolist(),
-                    tickvals=wd24nm_tickvals, # Use global tickvals/text
+                    tickvals=wd24nm_tickvals, 
                     ticktext=wd24nm_ticktext
                 ),
                 dict(
@@ -139,7 +172,7 @@ with tab3:
                     constraintrange=[df_filtered['Reported_by_encoded'].min(), df_filtered['Reported_by_encoded'].max()], 
                     label='Reported By', 
                     values=df_filtered['Reported_by_encoded'].tolist(),
-                    tickvals=reported_by_tickvals, # Use global tickvals/text
+                    tickvals=reported_by_tickvals, 
                     ticktext=reported_by_ticktext
                 )
             ])
