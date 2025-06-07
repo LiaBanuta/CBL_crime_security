@@ -15,11 +15,10 @@ st.title("Burglary Forecast Dashboard")
 # --- Load and preprocess data (GLOBAL FOR APP) ---
 csv_path = os.path.join("data", "final_data.csv")
 try:
-    # Use st.cache_data for efficient data loading in Streamlit
     @st.cache_data
     def load_and_preprocess_data(path):
         df_loaded = pd.read_csv(path)
-        
+
         # Strip any whitespace from column names just in case
         df_loaded.columns = df_loaded.columns.str.strip()
 
@@ -27,16 +26,13 @@ try:
         df_loaded["Year"] = df_loaded["Month"].str.slice(0, 4)
 
         # Filter for Burglary crimes only
-        df_loaded = df_loaded[df_loaded["Crime type"] == "Burglary"].copy() # .copy() to avoid SettingWithCopyWarning
+        df_loaded = df_loaded[df_loaded["Crime type"] == "Burglary"].copy()
 
         # Convert 'Month' to datetime format
         df_loaded['Month_datetime'] = pd.to_datetime(df_loaded['Month'], format='%Y-%m')
 
         # Create a string column for year-month (e.g., "2013-01")
         df_loaded['Year_Month'] = df_loaded['Month_datetime'].dt.to_period('M').astype(str)
-
-        # Create a numeric column for month
-        df_loaded['Month_numeric'] = df_loaded['Month_datetime'].dt.month
 
         # Label encode necessary columns for Parcoords
         le_lsoa = LabelEncoder()
@@ -54,62 +50,78 @@ try:
         wd24nm_tickvals = sorted(df_loaded['WD24NM_encoded'].unique())
         wd24nm_ticktext = [le_wd24nm.inverse_transform([val])[0] for val in wd24nm_tickvals]
         
-        # Return all necessary data and encoders/mappings
         return df_loaded, lsoa_tickvals, lsoa_ticktext, reported_by_tickvals, reported_by_ticktext, wd24nm_tickvals, wd24nm_ticktext
 
     df, lsoa_tickvals, lsoa_ticktext, reported_by_tickvals, reported_by_ticktext, wd24nm_tickvals, wd24nm_ticktext = load_and_preprocess_data(csv_path)
 
 except FileNotFoundError:
     st.error(f"File not found: {csv_path}")
-    st.stop() # Stop execution if file is not found
+    st.stop() 
 except Exception as e:
     st.error(f"Error loading or processing data: {e}")
     st.stop()
 
 
-# ---- Sidebar filter ----
-borough_options = ["All"] + list(df["WD24NM"].dropna().unique())
-borough = st.sidebar.selectbox(
-    "Select Borough (WD24NM column)",
-    borough_options
-)
+# ---- Sidebar filter (Panel for Filter Options) ----
+st.sidebar.subheader("Filter Options")
 
-# Filter for time interval using the slider
-min_date = df['Month_datetime'].min().date()  # Convert to datetime.date
-max_date = df['Month_datetime'].max().date()  # Convert to datetime.date
+# A checkbox to show/hide the filter panel
+show_filter = st.sidebar.checkbox("Show Filters", value=True)
 
-date_range = st.sidebar.slider(
-    "Select Date Range",
-    min_value=min_date,
-    max_value=max_date,
-    value=(min_date, max_date),
-    format="YYYY-MM"
-)
+if show_filter:
+    # **Borough Selection:**
+    borough_options = ["All"] + list(df["WD24NM"].dropna().unique())
+    boroughs = st.sidebar.multiselect(
+        "Select Boroughs", 
+        options=borough_options,
+        default=["All"],
+        help="Choose one or more boroughs to filter the data"
+    )
+    
+    # **Date Range Selection:**
+    min_date = df['Month_datetime'].min().date()  
+    max_date = df['Month_datetime'].max().date()
 
-# Apply the borough filter here once globally
-if borough != "All":
-    df_filtered = df[df["WD24NM"] == borough].copy()
-else:
-    df_filtered = df.copy()  # Work with a copy to avoid modifying the original cached df
+    date_range = st.sidebar.slider(
+        "Select Date Range", 
+        min_value=min_date, 
+        max_value=max_date,
+        value=(min_date, max_date),
+        format="YYYY-MM"
+    )
 
-# Apply the date filter here
-df_filtered = df_filtered[(df_filtered['Month_datetime'].dt.date >= date_range[0]) & (df_filtered['Month_datetime'].dt.date <= date_range[1])]
+    # Apply filters when "Apply Filters" button is clicked
+    if st.sidebar.button("Apply Filters"):
+        # Apply the borough filter
+        if "All" in boroughs:
+            df_filtered = df.copy()  # Do not filter by borough
+        else:
+            df_filtered = df[df["WD24NM"].isin(boroughs)]
+
+        # Apply the date filter
+        df_filtered = df_filtered[(df_filtered['Month_datetime'].dt.date >= date_range[0]) & 
+                                   (df_filtered['Month_datetime'].dt.date <= date_range[1])]
+
+        st.sidebar.markdown(f"**Selected Boroughs:** {', '.join(boroughs)}")
+        st.sidebar.markdown(f"**Date Range:** {date_range[0]} to {date_range[1]}")
+    else:
+        df_filtered = df.copy()
 
 # ---- Tabs ----
 tab1, tab2, tab3 = st.tabs(["Historical Data", "Model Predictions", "Cross-Analysis Results"])
 
 with tab1:
-    st.subheader(f"Data for {borough}" if borough != "All" else "All London Boroughs")
+    st.subheader(f"Data for {', '.join(boroughs)}" if boroughs != ["All"] else "All London Boroughs")
     
     # Aggregate burglaries per year and month (using the filtered df)
     summary = df_filtered.groupby("Year_Month").size().reset_index(name="Burglaries")
 
     # ---- Plot ----
     chart = alt.Chart(summary).mark_line().encode(
-        x=alt.X('Year_Month:O', title="Year-Month"),  # Display Year-Month combination
+        x=alt.X('Year_Month:O', title="Year-Month"),  
         y="Burglaries:Q",
         color=alt.value("blue"),
-        tooltip=['Year_Month:O', 'Burglaries:Q']  # Adding tooltip for better interaction
+        tooltip=['Year_Month:O', 'Burglaries:Q']  
     ).properties(
         title="Monthly Burglaries with Seasonal Patterns"
     )
