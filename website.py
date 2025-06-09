@@ -1,198 +1,244 @@
 import streamlit as st
 import pandas as pd
+import geopandas as gpd
 import altair as alt
-import os
 import folium
-from folium.plugins import HeatMap
-import plotly.graph_objects as go
-from sklearn.preprocessing import LabelEncoder
 from streamlit_folium import folium_static
-import datetime
+import os
+
+# ---- Page Configuration (Set this at the top) ----
+st.set_page_config(
+    page_title="London Burglary Analysis",
+    page_icon=" burglar_icon.png ",  # Optional: Add an icon
+    layout="wide"
+)
 
 # ---- Title ----
-st.title("Burglary Forecast Dashboard")
+st.title("London Burglary Analysis Dashboard")
+st.markdown("An interactive dashboard to explore historical burglary data across London's boroughs and wards.")
+
 
 # --- Load and preprocess data (GLOBAL FOR APP) ---
-csv_path = os.path.join("data", "final_data.csv")
-try:
-    @st.cache_data
-    def load_and_preprocess_data(path):
-        df_loaded = pd.read_csv(path)
+# This function is cached to improve performance. It runs only once when the data/paths change.
+@st.cache_data
+def load_data(csv_path, shp_path):
+    """
+    Loads crime data and geographical ward data, preprocesses, and merges them.
+    """
+    # Load crime data
+    try:
+        df = pd.read_csv(csv_path)
+    except FileNotFoundError:
+        st.error(f"Fatal Error: Crime data not found at '{csv_path}'. Please check the file path.")
+        st.stop()
 
-        # Strip any whitespace from column names just in case
-        df_loaded.columns = df_loaded.columns.str.strip()
+    # --- Preprocess Crime Data ---
+    df.columns = df.columns.str.strip()
+    df = df[df["Crime type"] == "Burglary"].copy()
+    
+    # Convert 'Month' to datetime objects for filtering and plotting
+    df['Month_dt'] = pd.to_datetime(df['Month'], format='%Y-%m')
+    df['Year'] = df['Month_dt'].dt.year
+    df['Year_Month'] = df['Month_dt'].dt.to_period('M').astype(str)
 
-        # Extract year from Month column (format:YYYY-MM)
-        df_loaded["Year"] = df_loaded["Month"].str.slice(0, 4)
+    # Load geographical data for London Wards
+    try:
+        wards_gdf = gpd.read_file(shp_path)
+    except Exception as e:
+        st.error(f"Fatal Error: Ward shapefile not found or could not be read from '{shp_path}'. Error: {e}")
+        st.stop()
 
-        # Filter for Burglary crimes only
-        df_loaded = df_loaded[df_loaded["Crime type"] == "Burglary"].copy()
+    # Ensure the Coordinate Reference System (CRS) is set to a web-friendly one (WGS84)
+    wards_gdf = wards_gdf.to_crs(epsg=4326)
 
-        # Convert 'Month' to datetime format
-        df_loaded['Month_datetime'] = pd.to_datetime(df_loaded['Month'], format='%Y-%m')
+    return df, wards_gdf
 
-        # Create a string column for year-month (e.g., "2013-01")
-        df_loaded['Year_Month'] = df_loaded['Month_datetime'].dt.to_period('M').astype(str)
+# --- Execute Data Loading ---
+CSV_PATH = os.path.join("data", "final_data.csv")
+SHP_PATH = os.path.join("London-wards-2018_ESRI", "London_Ward_CityMerged.shp")
+df_crime, wards_gdf = load_data(CSV_PATH, SHP_PATH)
 
-        # Label encode necessary columns for Parcoords
-        le_lsoa = LabelEncoder()
-        df_loaded['LSOA_name_encoded'] = le_lsoa.fit_transform(df_loaded['LSOA name'])
-        lsoa_tickvals = sorted(df_loaded['LSOA_name_encoded'].unique())
-        lsoa_ticktext = [le_lsoa.inverse_transform([val])[0] for val in lsoa_tickvals]
 
-        le_reported_by = LabelEncoder()
-        df_loaded['Reported_by_encoded'] = le_reported_by.fit_transform(df_loaded['Reported by'])
-        reported_by_tickvals = sorted(df_loaded['Reported_by_encoded'].unique())
-        reported_by_ticktext = [le_reported_by.inverse_transform([val])[0] for val in reported_by_tickvals]
+# ---- Sidebar for Filters ----
+st.sidebar.header("Filter Options")
 
-        le_wd24nm = LabelEncoder()
-        df_loaded['WD24NM_encoded'] = le_wd24nm.fit_transform(df_loaded['WD24NM'])
-        wd24nm_tickvals = sorted(df_loaded['WD24NM_encoded'].unique())
-        wd24nm_ticktext = [le_wd24nm.inverse_transform([val])[0] for val in wd24nm_tickvals]
-        
-        return df_loaded, lsoa_tickvals, lsoa_ticktext, reported_by_tickvals, reported_by_ticktext, wd24nm_tickvals, wd24nm_ticktext
+# -- Year Filter --
+all_years = sorted(df_crime['Year'].unique(), reverse=True)
+selected_years = st.sidebar.multiselect(
+    "Select Year(s)",
+    options=all_years,
+    default=all_years,
+    help="Select the years you want to analyze."
+)
 
-    df, lsoa_tickvals, lsoa_ticktext, reported_by_tickvals, reported_by_ticktext, wd24nm_tickvals, wd24nm_ticktext = load_and_preprocess_data(csv_path)
+# -- Ward Filter --
+# Use 'WD24NM' from crime data as it seems to be the ward name identifier
+all_wards = ["All Wards"] + sorted(df_crime['WD24NM'].dropna().unique())
+selected_wards = st.sidebar.multiselect(
+    "Select Ward(s)",
+    options=all_wards,
+    default=["All Wards"],
+    help="Select one or more wards. 'All Wards' shows data for all of London."
+)
 
-except FileNotFoundError:
-    st.error(f"File not found: {csv_path}")
-    st.stop() 
-except Exception as e:
-    st.error(f"Error loading or processing data: {e}")
+# ---- Filtering Logic ----
+# Start with a copy of the original dataframe
+df_filtered = df_crime.copy()
+
+# Apply year filter
+if selected_years:
+    df_filtered = df_filtered[df_filtered['Year'].isin(selected_years)]
+else:
+    # If nothing is selected, show a message and stop further processing for this run
+    st.warning("Please select at least one year to display data.")
     st.stop()
 
+# Apply ward filter
+if "All Wards" not in selected_wards and selected_wards:
+    df_filtered = df_filtered[df_filtered['WD24NM'].isin(selected_wards)]
 
-# ---- Sidebar filter (Panel for Filter Options) ----
-st.sidebar.subheader("Filter Options")
+# Handle case where the filter results in no data
+if df_filtered.empty:
+    st.warning("No burglary data found for the selected filters. Please adjust your selection.")
+    st.stop()
 
-# A checkbox to show/hide the filter panel
-show_filter = st.sidebar.checkbox("Show Filters", value=True)
+# ---- Main Page Content ----
+tab1, tab2, tab3 = st.tabs(["Historical Data Analysis", "Model Predictions", "Cross-Analysis (Future)"])
 
-if show_filter:
-    # **Borough Selection:**
-    borough_options = ["All"] + list(df["WD24NM"].dropna().unique())
-    boroughs = st.sidebar.multiselect(
-        "Select Boroughs", 
-        options=borough_options,
-        default=["All"],
-        help="Choose one or more boroughs to filter the data"
-    )
-    
-    # **Date Range Selection:**
-    min_date = df['Month_datetime'].min().date()  
-    max_date = df['Month_datetime'].max().date()
-
-    date_range = st.sidebar.slider(
-        "Select Date Range", 
-        min_value=min_date, 
-        max_value=max_date,
-        value=(min_date, max_date),
-        format="YYYY-MM"
-    )
-
-    # Apply filters when "Apply Filters" button is clicked
-    if st.sidebar.button("Apply Filters"):
-        # Apply the borough filter
-        if "All" in boroughs:
-            df_filtered = df.copy()  # Do not filter by borough
-        else:
-            df_filtered = df[df["WD24NM"].isin(boroughs)]
-
-        # Apply the date filter
-        df_filtered = df_filtered[(df_filtered['Month_datetime'].dt.date >= date_range[0]) & 
-                                   (df_filtered['Month_datetime'].dt.date <= date_range[1])]
-
-        st.sidebar.markdown(f"**Selected Boroughs:** {', '.join(boroughs)}")
-        st.sidebar.markdown(f"**Date Range:** {date_range[0]} to {date_range[1]}")
-    else:
-        df_filtered = df.copy()
-
-# ---- Tabs ----
-tab1, tab2, tab3 = st.tabs(["Historical Data", "Model Predictions", "Cross-Analysis Results"])
-
+# =================================================================================================
+# ---- TAB 1: HISTORICAL DATA ANALYSIS ----
+# =================================================================================================
 with tab1:
-    st.subheader(f"Data for {', '.join(boroughs)}" if boroughs != ["All"] else "All London Boroughs")
-    
-    # Aggregate burglaries per year and month (using the filtered df)
-    summary = df_filtered.groupby("Year_Month").size().reset_index(name="Burglaries")
+    st.header("Geospatial and Temporal Analysis")
 
-    # ---- Plot ----
-    chart = alt.Chart(summary).mark_line().encode(
-        x=alt.X('Year_Month:O', title="Year-Month"),  
-        y="Burglaries:Q",
-        color=alt.value("blue"),
-        tooltip=['Year_Month:O', 'Burglaries:Q']  
-    ).properties(
-        title="Monthly Burglaries with Seasonal Patterns"
-    )
-    
-    st.altair_chart(chart, use_container_width=True)
+    # --- Create Columns for Layout ---
+    map_col, stats_col = st.columns([3, 2]) # Map takes 3/5 of the width, stats take 2/5
 
-    # ---- Interactive Map ----
-    st.markdown("### Interactive Map of Crime Hotspots")
+    with map_col:
+        st.subheader("Interactive Crime Map")
+        st.markdown("Ward boundaries are colored by burglary counts. Darker red indicates more incidents.")
 
-    # Create a folium map centered around London
-    m = folium.Map(location=[51.5074, -0.1278], zoom_start=10)  # Center map on London
+        # --- Aggregate data for the map ---
+        # Count crimes per ward based on the filtered data
+        ward_crime_counts = df_filtered.groupby('WD24NM').size().reset_index(name='crime_count')
 
-    # Add HeatMap layer for burglary incidents
-    heat_data = [[row['Latitude'], row['Longitude']] for index, row in df_filtered.iterrows() if pd.notnull(row['Latitude']) and pd.notnull(row['Longitude'])]
-    HeatMap(heat_data).add_to(m)
-
-    # Add the map to Streamlit
-    folium_static(m)
-
-    # ---- Notes ----
-    st.markdown("""
-    *Note: This map visualizes real crime data. Final version will include model results and predicted crime hotspots.*
-    """)
-    
-with tab2:
-    st.subheader("Model Predictions")
-
-with tab3:
-    st.subheader("Cross-Analysis Results")
-    
-    # --- Create the Plotly Figure (using the filtered df) ---
-    fig = go.Figure(data=
-        go.Parcoords(
-            line=dict(color='blue', showscale=False), 
-            dimensions= list([  
-                dict(
-                    range=[df_filtered['LSOA_name_encoded'].min(), df_filtered['LSOA_name_encoded'].max()],
-                    constraintrange=[df_filtered['LSOA_name_encoded'].min(), df_filtered['LSOA_name_encoded'].max()], 
-                    label='Borough',
-                    values=df_filtered['LSOA_name_encoded'].tolist(),
-                    tickvals=lsoa_tickvals, 
-                    ticktext=lsoa_ticktext
-                ),
-                dict(
-                    range=[df_filtered['Month_numeric'].min(), df_filtered['Month_numeric'].max()],
-                    constraintrange=[df_filtered['Month_numeric'].min(), df_filtered['Month_numeric'].max()], 
-                    label='Month',
-                    values=df_filtered['Month_numeric'].tolist()
-                ),
-                dict(
-                    range=[df_filtered['WD24NM_encoded'].min(), df_filtered['WD24NM_encoded'].max()],
-                    constraintrange=[df_filtered['WD24NM_encoded'].min(), df_filtered['WD24NM_encoded'].max()], 
-                    label='Ward Name', 
-                    values=df_filtered['WD24NM_encoded'].tolist(),
-                    tickvals=wd24nm_tickvals, 
-                    ticktext=wd24nm_ticktext
-                ),
-                dict(
-                    range=[df_filtered['Reported_by_encoded'].min(), df_filtered['Reported_by_encoded'].max()],
-                    constraintrange=[df_filtered['Reported_by_encoded'].min(), df_filtered['Reported_by_encoded'].max()], 
-                    label='Reported By', 
-                    values=df_filtered['Reported_by_encoded'].tolist(),
-                    tickvals=reported_by_tickvals, 
-                    ticktext=reported_by_ticktext
-                )
-            ])
+        # Merge crime counts with the ward geometries
+        # Use a left merge to keep all wards, even those with 0 crimes in the filtered period
+        map_data_gdf = wards_gdf.merge(
+            ward_crime_counts,
+            left_on='NAME',      # Column in shapefile
+            right_on='WD24NM',   # Column in crime CSV
+            how='left'
         )
-    )
+        # Fill wards with no crimes (NaN) with 0
+        map_data_gdf['crime_count'] = map_data_gdf['crime_count'].fillna(0)
 
-    fig.update_layout(
-        title='Crime Data Parallel Coordinates Plot'
-    )
+        # --- Create the Folium Map ---
+        # Center the map on London
+        m = folium.Map(location=[51.5074, -0.1278], zoom_start=10, tiles='CartoDB dark_matter')
 
-    st.plotly_chart(fig, use_container_width=True) # Use st.plotly_chart for displaying in Streamlit
+        # Add the choropleth layer
+        choropleth = folium.Choropleth(
+            geo_data=map_data_gdf,
+            name='choropleth',
+            data=map_data_gdf,
+            columns=['NAME', 'crime_count'],
+            key_on='feature.properties.NAME',
+            fill_color='YlOrRd',  # Yellow-Orange-Red color scale as requested
+            fill_opacity=0.7,
+            line_opacity=0.4,
+            legend_name='Number of Burglaries',
+            highlight=True
+        ).add_to(m)
+
+        # Add a tooltip to show Ward Name and Crime Count on hover
+        folium.GeoJsonTooltip(['NAME', 'crime_count'], aliases=['Ward:', 'Burglaries:']).add_to(choropleth.geojson)
+        
+        # Display the map
+        folium_static(m, width=700, height=500)
+        
+        st.info(
+            """
+            **How to use the map:**
+            - **Hover** over a ward to see its name and the total number of burglaries for the selected period.
+            - **Zoom and Pan** to explore different areas.
+            - **LSOA Level:** The requested drill-down to LSOA boundaries upon clicking is a complex feature. A future version could implement this by updating the map based on a ward selection to show LSOA-level data for that specific ward.
+            """
+        )
+
+
+    with stats_col:
+        # --- Total Crimes KPI ---
+        total_burglaries = df_filtered.shape[0]
+        st.metric(label="Total Burglaries (Selected Period)", value=f"{total_burglaries:,}")
+        
+        # --- Top 5 Wards by Crime ---
+        st.subheader("Top 5 Wards")
+        top_wards = df_filtered['WD24NM'].value_counts().nlargest(5).reset_index()
+        top_wards.columns = ['Ward', 'Number of Burglaries']
+        st.dataframe(top_wards, use_container_width=True, hide_index=True)
+
+        # --- Highest Crime Month ---
+        st.subheader("Peak Month")
+        peak_month_data = df_filtered.groupby('Year_Month').size().idxmax()
+        peak_month_count = df_filtered.groupby('Year_Month').size().max()
+        st.metric(label=f"Month with Most Burglaries", value=peak_month_data, delta=f"{peak_month_count} incidents", delta_color="off")
+
+
+    st.divider() # Add a visual separator
+
+    # --- Time Series Plots (Below the map and stats) ---
+    st.header("Temporal Trends")
+    plot_col1, plot_col2 = st.columns(2)
+
+    with plot_col1:
+        st.subheader("Seasonal Analysis (Monthly)")
+        # Aggregate data by month for the line chart
+        monthly_summary = df_filtered.groupby('Year_Month').size().reset_index(name='Burglaries')
+        
+        # Create Altair line chart
+        seasonal_chart = alt.Chart(monthly_summary).mark_line(
+            point=True, # Add points to the line
+            strokeWidth=2
+        ).encode(
+            x=alt.X('Year_Month:T', title='Month'),
+            y=alt.Y('Burglaries:Q', title='Number of Burglaries'),
+            tooltip=['Year_Month:T', 'Burglaries:Q']
+        ).properties(
+            title='Monthly Burglary Trends'
+        ).interactive() # Allows zooming and panning
+
+        st.altair_chart(seasonal_chart, use_container_width=True)
+
+    with plot_col2:
+        st.subheader("Yearly Analysis")
+        # Aggregate data by year for the bar chart
+        yearly_summary = df_filtered.groupby('Year').size().reset_index(name='Burglaries')
+        
+        # Create Altair bar chart
+        yearly_chart = alt.Chart(yearly_summary).mark_bar().encode(
+            x=alt.X('Year:O', title='Year', axis=alt.Axis(labelAngle=0)), # 'O' for Ordinal/Categorical
+            y=alt.Y('Burglaries:Q', title='Number of Burglaries'),
+            tooltip=['Year:O', 'Burglaries:Q']
+        ).properties(
+            title='Total Burglaries per Year'
+        )
+
+        st.altair_chart(yearly_chart, use_container_width=True)
+
+# =================================================================================================
+# ---- TAB 2: MODEL PREDICTIONS ----
+# =================================================================================================
+with tab2:
+    st.header("Future Crime Predictions")
+    st.info("This section is under development. Once the predictive model is complete, this tab will display forecasted burglary hotspots and trends.")
+    st.image("https://i.imgur.com/g2n9t2H.png", caption="Placeholder for future prediction map.") # A placeholder image
+
+# =================================================================================================
+# ---- TAB 3: CROSS-ANALYSIS (Future) ----
+# =================================================================================================
+with tab3:
+    st.header("Cross-Feature Correlation Analysis")
+    st.info("This section is under development. It will feature tools like parallel coordinate plots or correlation matrices to explore relationships between different crime attributes (e.g., location, time, outcome).")
+    # You can place your parallel coordinates plot here once you are ready to implement it.
+    # The code from your original script would go here, adapted to use the df_filtered dataframe.
