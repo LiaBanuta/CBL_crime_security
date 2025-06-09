@@ -184,8 +184,8 @@ for params in param_list:
                     best_acc_for_param = acc
                     best_f1_for_param = f1
 
-                # Track global bests
-                if combined_score > best_f1:  # or other global metric
+                
+                if combined_score > best_f1: 
                     best_f1 = combined_score
                     best_f1_info = {
                         'params': params,
