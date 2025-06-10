@@ -49,7 +49,7 @@ def load_prediction_data(lsoa_pred_path, hotspot_pred_path):
     except FileNotFoundError as e:
         st.error(f"Fatal Error: Prediction data not found. Details: {e}")
         st.stop()
-    
+
     df_lsoa_preds['lsoa_code'] = df_lsoa_preds['lsoa_code'].str.strip()
     df_hotspots_wide.index = df_hotspots_wide.index.str.strip()
 
@@ -84,10 +84,10 @@ with st.spinner("Spatially joining LSOAs to Wards and aggregating predictions...
     unmapped_predictions = df_predictions_with_ward['WD24NM'].isnull().sum()
     if unmapped_predictions > 0:
         st.warning(f"Could not map {unmapped_predictions} LSOA predictions to a ward. They will be excluded.")
-    
+
     df_predictions_with_ward.dropna(subset=['WD24NM'], inplace=True)
     df_hotspots_with_ward.dropna(subset=['WD24NM'], inplace=True)
-    
+
     ward_predictions = df_predictions_with_ward.groupby('WD24NM')['predicted_burglary_count'].sum().reset_index()
     ward_predictions = ward_predictions.rename(columns={'predicted_burglary_count': 'ward_predicted_count'})
 
@@ -122,13 +122,13 @@ tab1, tab2, tab3 = st.tabs(["📈 Historical Data Analysis", "🚨 Model Predict
 
 
 # =================================================================================================
-# ---- TAB 1: HISTORICAL DATA ANALYSIS (KEYERROR FIXED + PLOTS REVISED) ----
+# ---- TAB 1: HISTORICAL DATA ANALYSIS (LSOA HOVER FIXED) ----
 # =================================================================================================
 with tab1:
     st.header("Geospatial and Temporal Analysis")
     if 'selected_ward' not in st.session_state:
         st.session_state.selected_ward = None
-    
+
     # ---- STATE 1: London-wide view ----
     if st.session_state.selected_ward is None:
         map_col, stats_col = st.columns([3, 2])
@@ -151,7 +151,7 @@ with tab1:
                 if "Ward:" in tooltip_text:
                     st.session_state.selected_ward = tooltip_text.split("Ward:")[1].split("Burglaries:")[0].strip()
                     st.rerun()
-        
+
         with stats_col:
             st.subheader("London-wide Overview")
             st.markdown(f"Displaying data for **{', '.join(map(str, selected_years))}**.")
@@ -172,7 +172,6 @@ with tab1:
                 ).properties(height=300).interactive()
                 st.altair_chart(chart, use_container_width=True)
 
-        # REVISED PLOTS: Side-by-side temporal charts
         st.subheader("Temporal Analysis")
         plot1_col, plot2_col = st.columns(2)
         with plot1_col, st.container(border=True):
@@ -187,7 +186,7 @@ with tab1:
                 tooltip=[alt.Tooltip('Month_dt:T', title='Month', format='%B %Y'), alt.Tooltip('count:Q', title='Incidents')]
             ).interactive()
             st.altair_chart(monthly_chart, use_container_width=True)
-            
+
         with plot2_col, st.container(border=True):
             st.markdown("##### Yearly Totals")
             yearly_trend_all = df_filtered.groupby('Year').size().reset_index(name='count')
@@ -208,25 +207,33 @@ with tab1:
             if st.button("⬅️ Back to London View"):
                 st.session_state.selected_ward = None
                 st.rerun()
-            
-            # --- KEYERROR FIX: Changed 'lsoa_code' to 'LSOA code' to match the column in final_data.csv ---
+
             lsoa_crime_counts = ward_data.groupby('LSOA code').size().reset_index(name='crime_count')
             ward_boundary_gdf = wards_gdf[wards_gdf['NAME'] == selected_ward_name]
             lsoa_boundaries_in_ward = lsoa_gdf[lsoa_gdf['LSOA11CD'].isin(ward_data['LSOA code'].unique())]
             
-            lsoa_map_data = lsoa_boundaries_in_ward.merge(lsoa_crime_counts, left_on='LSOA11CD', right_on='LSOA code', how='left').fillna(0)
-            # --- END FIX ---
-            
+            # ### FIX ### The line below is the corrected one.
+            # We replace the overly broad .fillna(0) with a targeted fillna on the 'crime_count' column only.
+            lsoa_map_data = lsoa_boundaries_in_ward.merge(lsoa_crime_counts, left_on='LSOA11CD', right_on='LSOA code', how='left').fillna({'crime_count': 0})
+
             map_center = ward_boundary_gdf.dissolve().centroid.iloc[0]
             m_lsoa = folium.Map(location=[map_center.y, map_center.x], zoom_start=13, tiles='CartoDB dark_matter')
-            folium.Choropleth(
+
+            choro_lsoa = folium.Choropleth(
                 geo_data=lsoa_map_data, data=lsoa_map_data,
                 columns=['LSOA11CD', 'crime_count'], key_on='feature.properties.LSOA11CD',
                 fill_color='Reds', fill_opacity=0.7, line_opacity=0.5,
-                legend_name='Burglaries in LSOA'
+                legend_name='Burglaries in LSOA', highlight=True
             ).add_to(m_lsoa)
+
+            folium.GeoJsonTooltip(
+                fields=['LSOA11NM', 'crime_count'],
+                aliases=['LSOA:', 'Burglaries:'],
+                sticky=False
+            ).add_to(choro_lsoa.geojson)
+
             st_folium(m_lsoa, width='100%', height=425)
-        
+
         with stats_col:
             st.subheader(f"Statistics for {selected_ward_name}")
             st.markdown(f"Displaying data for **{', '.join(map(str, selected_years))}**.")
@@ -250,7 +257,7 @@ with tab1:
                 st.altair_chart(trend_chart, use_container_width=True)
 
 # =================================================================================================
-# ---- TAB 2: MODEL PREDICTIONS (No changes in this section) ----
+# ---- TAB 2: MODEL PREDICTIONS (NEW CHARTS ADDED) ----
 # =================================================================================================
 with tab2:
     st.header("Ward-Level Burglary Forecast")
@@ -345,6 +352,69 @@ with tab2:
                 st.altair_chart(forecast_chart, use_container_width=True)
             else:
                 st.warning("Forecast data not available for this selection.")
+
+    # ---- NEW SECTION: Historical vs. Predicted Charts ----
+    st.divider()
+    st.header("Historical vs. Predicted Trends")
+    st.markdown("Comparing city-wide historical data against future model predictions.")
+
+    # --- Data Prep for Comparison Charts ---
+    # Yearly data
+    historical_yearly = df_crime.groupby('Year').size().reset_index(name='count')
+    historical_yearly['Source'] = 'Historical'
+    pred_yearly_df = df_hotspots_long.copy()
+    pred_yearly_df['Year'] = pred_yearly_df['forecast_month'].dt.year
+    predicted_yearly = pred_yearly_df.groupby('Year')['predicted_incidents'].sum().reset_index(name='count')
+    predicted_yearly['Source'] = 'Predicted'
+    combined_yearly = pd.concat([historical_yearly, predicted_yearly])
+
+    # Monthly data
+    historical_monthly = df_crime.groupby('Month_dt').size().reset_index(name='count').rename(columns={'Month_dt': 'Date'})
+    predicted_monthly = df_hotspots_long.groupby('forecast_month')['predicted_incidents'].sum().reset_index(name='count').rename(columns={'forecast_month': 'Date'})
+    # To connect the line, create a dataframe for the red line that starts with the last point of the blue line.
+    last_historical_point = historical_monthly.nlargest(1, 'Date')
+    connection_df = pd.concat([last_historical_point, predicted_monthly]).sort_values('Date')
+
+    # --- Create and Display Charts ---
+    chart1_col, chart2_col = st.columns(2)
+    with chart1_col:
+        with st.container(border=True):
+            st.markdown("##### Yearly Totals: Historical vs. Predicted")
+            yearly_comparison_chart = alt.Chart(combined_yearly).mark_bar().encode(
+                x=alt.X('Year:O', title='Year', axis=alt.Axis(labelAngle=0)),
+                y=alt.Y('count:Q', title='Total Incidents'),
+                color=alt.Color('Source:N',
+                                scale=alt.Scale(domain=['Historical', 'Predicted'], range=['#4a90e2', '#e45756']),
+                                legend=alt.Legend(title="Data Source", orient="top")),
+                tooltip=[alt.Tooltip('Year:O', title='Year'), alt.Tooltip('count:Q', title='Total Incidents', format=',.0f'), 'Source']
+            ).interactive()
+            st.altair_chart(yearly_comparison_chart, use_container_width=True)
+
+    with chart2_col:
+        with st.container(border=True):
+            st.markdown("##### Monthly Trend: Historical to Predicted")
+            # Chart Layer 1: Historical Data (Blue)
+            line_hist = alt.Chart(historical_monthly).mark_line(
+                color='#4a90e2',
+                point=alt.OverlayMarkDef(color="#4a90e2")
+            ).encode(
+                x=alt.X('Date:T', title='Month'),
+                y=alt.Y('count:Q', title='Number of Incidents'),
+                tooltip=[alt.Tooltip('Date:T', format='%B %Y', title='Date'), alt.Tooltip('count:Q', title='Incidents', format=',.0f')]
+            )
+            # Chart Layer 2: Predicted Data (Red)
+            line_pred = alt.Chart(connection_df).mark_line(
+                color='#e45756',
+                point=alt.OverlayMarkDef(color="#e45756")
+            ).encode(
+                x='Date:T',
+                y='count:Q',
+                tooltip=[alt.Tooltip('Date:T', format='%B %Y', title='Date'), alt.Tooltip('count:Q', title='Predicted Incidents', format=',.0f')]
+            )
+            # Combine layers
+            monthly_comparison_chart = (line_hist + line_pred).interactive()
+            st.altair_chart(monthly_comparison_chart, use_container_width=True)
+
 
 # =================================================================================================
 # ---- TAB 3: CROSS-ANALYSIS (Unchanged) ----
