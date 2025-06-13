@@ -44,9 +44,6 @@ By identifying crime patterns and hotspots through predictive modeling, this pro
 │   ├── final_data.csv
 │   ├── lsoa_predictions_modified.csv
 │   └── future_crime_hotspot_predictions.csv
-├── assets/                      # Optional: For custom marker icons
-│   ├── start.png
-│   └── end.png
 ├── LSOA_2011_Boundaries.geojson # LSOA boundary data
 ├── website.py                   # The main Streamlit application script
 └── README.md                    # This file
@@ -87,7 +84,6 @@ Install all required Python libraries using the provided `requirements.txt` file
 ```bash
 pip install streamlit pandas geopandas altair folium streamlit-folium numpy osmnx
 ```
-*(If you were to create a `requirements.txt` file, you would list these packages in it.)*
 
 ### 5. Download and Place Data Files
 
